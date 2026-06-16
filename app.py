@@ -76,7 +76,9 @@ html,body,.stApp{background:#070d1a!important;color:#dde3f0;}
 div[data-testid="stForm"]{background:transparent!important;border:none!important;padding:0!important;}
 .stProgress>div>div>div{background:linear-gradient(90deg,#6366f1,#06b6d4)!important;border-radius:100px!important;}
 hr{border-color:rgba(255,255,255,.06)!important;}
-</style>""", unsafe_allow_html=True)
+""", unsafe_allow_html=True)
+    
+
 
 # ─── PATHS ─────────────────────────────────────────────────────────────────────
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -140,6 +142,19 @@ PTHEME = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
               xaxis=dict(gridcolor="rgba(255,255,255,.05)", linecolor="rgba(255,255,255,.06)", tickfont=dict(color="#64748b")),
               yaxis=dict(gridcolor="rgba(255,255,255,.05)", linecolor="rgba(255,255,255,.06)", tickfont=dict(color="#64748b")))
 
+# Adjust plotly theme for light mode if selected
+try:
+    if st.session_state.get('theme','dark') == 'light':
+        PTHEME.update({
+            'paper_bgcolor': 'white', 'plot_bgcolor': 'white',
+            'font': dict(color='#0f172a', family='Inter'),
+            'legend': dict(bgcolor='rgba(255,255,255,0)', font=dict(color='#0f172a')),
+            'xaxis': dict(gridcolor='rgba(15,23,42,0.06)', linecolor='rgba(15,23,42,0.08)', tickfont=dict(color='#334155')),
+            'yaxis': dict(gridcolor='rgba(15,23,42,0.06)', linecolor='rgba(15,23,42,0.08)', tickfont=dict(color='#334155'))
+        })
+except Exception:
+    pass
+
 # ─── DATABASE ──────────────────────────────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=20)
@@ -150,6 +165,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS predictions(id TEXT PRIMARY KEY,user_id TEXT,username TEXT,
         timestamp TEXT,class_name TEXT,confidence REAL,features_json TEXT,recommendations_json TEXT,dataset_name TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS admin_logs(id TEXT PRIMARY KEY,admin_id TEXT,action TEXT,details TEXT,timestamp TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_actions(id TEXT PRIMARY KEY,user_id TEXT,username TEXT,action TEXT,details TEXT,timestamp TEXT)''')
     if not c.execute("SELECT 1 FROM users WHERE username='admin'").fetchone():
         c.execute("INSERT INTO users VALUES(?,?,?,?,?,?,?)",
             (str(uuid.uuid4()),"admin",hashlib.sha256(b"admin123").hexdigest(),"admin@Poverty.ug","admin",None,dt.now().isoformat()))
@@ -181,6 +197,9 @@ def register_user(u,p,e,pic):
 
 def log_action(aid,action,details):
     db_x("INSERT INTO admin_logs VALUES(?,?,?,?,?)",(str(uuid.uuid4()),aid,action,details,dt.now().isoformat()))
+
+def log_user_action(uid,username,action,details):
+    db_x("INSERT INTO user_actions VALUES(?,?,?,?,?,?)",(str(uuid.uuid4()),uid,username,action,details,dt.now().isoformat()))
 
 # ─── ML PIPELINE ───────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -286,6 +305,12 @@ def save_pred(user,cls,conf,feat_d,recs,src):
     db_x("INSERT INTO predictions (id, user_id, username, timestamp, class_name, confidence, features_json, recommendations_json, dataset_name) VALUES(?,?,?,?,?,?,?,?,?)",
          (str(uuid.uuid4()),user["id"],user["username"],dt.now().isoformat(),
           cls,conf,json.dumps(feat_d),json.dumps(recs),src))
+    try:
+        # Log user classification action for audit/history
+        details = json.dumps({"class":cls,"confidence":conf,"source":src,"features":feat_d})
+        log_user_action(user.get("id"), user.get("username"), "classification", details)
+    except Exception:
+        pass
 
 def make_pdf(data):
     pdf=FPDF(); pdf.add_page(); pdf.set_margins(14,14,14); pdf.set_auto_page_break(True,12)
@@ -298,11 +323,13 @@ def make_pdf(data):
         except Exception:
             pass
     pdf.cell(0,12,"",ln=True)
-    pdf.cell(0,8,"  AI Poverty Classification Project",ln=True)
+    pdf.cell(0,8,"  Uganda Household Poverty Intelligence System",ln=True)
     pdf.set_font("Helvetica","B",13); pdf.cell(0,8,"  Poverty Prediction Report",ln=True)
     pdf.set_text_color(0,0,0); pdf.ln(6)
     pdf.set_font("Helvetica","",10)
     pdf.cell(0,5,f"Report ID : {uuid.uuid4().hex[:10].upper()}",ln=True)
+    if data.get("pred_name"):
+        pdf.cell(0,5,f"Prediction : {data['pred_name']}",ln=True)
     pdf.cell(0,5,f"Generated : {dt.now().strftime('%Y-%m-%d %H:%M:%S')}",ln=True)
     pdf.cell(0,5,f"Analyst   : {data['username']}",ln=True)
     if data.get("email"):
@@ -465,6 +492,9 @@ def user_sidebar(usr):
 def page_predict(usr):
     st.markdown('<div class="page-header"><p class="sec-title">🔮 Household Poverty Prediction</p><p class="sec-sub">Fill the household profile below to generate an AI-powered poverty classification.</p></div>', unsafe_allow_html=True)
     with st.form("pf", clear_on_submit=False):
+        st.markdown("📝 Prediction Name")
+        q_pred_name = st.text_input("Label", placeholder="e.g. Name, Village, Zone", label_visibility="collapsed")
+        st.markdown("---")
         c1,c2,c3 = st.columns(3)
         with c1:
             st.markdown("**👤 Head of Household**")
@@ -511,7 +541,7 @@ def page_predict(usr):
         st.session_state["lp"]={"cls":pred,"name":LABELS[pred],"conf":float(max(proba)),
                                  "proba":proba,"recs":recs,"inputs":inputs_d,
                                  "username":usr["username"],"email":usr.get("email",""),
-                                 "profile_pic":usr.get("profile_pic","")}
+                                 "profile_pic":usr.get("profile_pic",""),"pred_name":q_pred_name}
 
     if "lp" in st.session_state:
         p=st.session_state["lp"]; cls=p["cls"]; conf=p["conf"]; proba=p["proba"]
@@ -587,16 +617,30 @@ def page_predict(usr):
         st.markdown("#### 📥 Export Results")
         d1, d2, _, _ = st.columns(4)
         pdf_b=make_pdf(p)
-        d1.download_button("📄 PDF Report",data=pdf_b,file_name=f"Poverty_{dt.now().strftime('%Y%m%d_%H%M%S')}.pdf",mime="application/pdf",use_container_width=True)
+        pdf_name = f"Poverty_{dt.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        if d1.download_button("📄 PDF Report",data=pdf_b,file_name=pdf_name,mime="application/pdf",use_container_width=True):
+            try:
+                log_user_action(usr.get("id"), usr.get("username"), "export_pdf", f"file:{pdf_name}|class:{p['name']}|conf:{conf}")
+            except Exception:
+                pass
         df_dl=pd.DataFrame([{**p["inputs"],"Class":p["name"],"Confidence":f"{conf:.2%}"}])
-        d2.download_button("📊 CSV Export",data=df_dl.to_csv(index=False).encode(),file_name=f"Poverty_{dt.now().strftime('%Y%m%d_%H%M%S')}.csv",mime="text/csv",use_container_width=True)
+        csv_name = f"Poverty_{dt.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        if d2.download_button("📊 CSV Export",data=df_dl.to_csv(index=False).encode(),file_name=csv_name,mime="text/csv",use_container_width=True):
+            try:
+                log_user_action(usr.get("id"), usr.get("username"), "export_csv", f"file:{csv_name}|class:{p['name']}|conf:{conf}")
+            except Exception:
+                pass
 
 
 # ─── BULK UPLOAD ────────────────────────────────────────────────────────────────
 def page_bulk(usr):
     st.markdown('<div class="page-header"><p class="sec-title">📂 Bulk CSV Prediction</p><p class="sec-sub">Upload a CSV of households for batch poverty classification with full analytics.</p></div>', unsafe_allow_html=True)
     tpl=pd.DataFrame([{"Age":"26-35","Gender":"Male","Marital":"Married","Education":"Primary","HouseholdSize":5,"MonthlyIncome":"<50k","Region":"Northern (3)","Urban":"Rural"}])
-    st.download_button("📥 Download CSV Template",data=tpl.to_csv(index=False).encode(),file_name="Poverty_template.csv",mime="text/csv")
+    if st.download_button("📥 Download CSV Template",data=tpl.to_csv(index=False).encode(),file_name="Poverty_template.csv",mime="text/csv"):
+        try:
+            log_user_action(usr.get("id"), usr.get("username"), "download_template", "Poverty_template.csv")
+        except Exception:
+            pass
     up=st.file_uploader("Upload household CSV",type=["csv"])
     if not up: return
     df=pd.read_csv(up)
@@ -652,7 +696,12 @@ def page_bulk(usr):
             title="Poverty Distribution by Region",barmode="stack",template="plotly_dark")
         fig_stk.update_layout(height=300,**PTHEME); c2.plotly_chart(fig_stk,use_container_width=True)
     st.dataframe(df_out,use_container_width=True)
-    st.download_button("📥 Download Results",data=df_out.to_csv(index=False).encode(),file_name=f"batch_results_{dt.now().strftime('%Y%m%d_%H%M%S')}.csv",mime="text/csv",use_container_width=True)
+    results_name = f"batch_results_{dt.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    if st.download_button("📥 Download Results",data=df_out.to_csv(index=False).encode(),file_name=results_name,mime="text/csv",use_container_width=True):
+        try:
+            log_user_action(usr.get("id"), usr.get("username"), "export_batch_csv", results_name)
+        except Exception:
+            pass
     # save to DB
     for _,row in df_out.iterrows():
         try: db_x("INSERT INTO predictions (id, user_id, username, timestamp, class_name, confidence, features_json, recommendations_json, dataset_name) VALUES(?,?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),usr["id"],usr["username"],dt.now().isoformat(),row["Class"],float(str(row["Confidence"]).replace("%",""))/100,"{}","[]",up.name))
@@ -758,7 +807,11 @@ def page_history(usr):
     dff=df[df["Class"].isin(cls_filter)]
     if src_filter: dff=dff[dff["Source"].str.contains(src_filter,case=False,na=False)]
     st.dataframe(dff[["Date","Class","ConfPct","Source"]].rename(columns={"ConfPct":"Confidence %"}),use_container_width=True)
-    st.download_button("📥 Export History",dff.to_csv(index=False).encode(),file_name="my_history.csv",mime="text/csv")
+    if st.download_button("📥 Export History",dff.to_csv(index=False).encode(),file_name="my_history.csv",mime="text/csv"):
+        try:
+            log_user_action(usr.get("id"), usr.get("username"), "export_history", "my_history.csv")
+        except Exception:
+            pass
 
 # ─── PROFILE ────────────────────────────────────────────────────────────────────
 def page_profile(usr):
@@ -952,15 +1005,26 @@ def admin_ml():
         st.markdown(f"**{icon} {art}** — {sz_str}")
 
 def admin_logs():
-    st.markdown('<div class="page-header"><p class="sec-title">📋 Audit Trail</p><p class="sec-sub">All administrator actions logged with timestamps.</p></div>',unsafe_allow_html=True)
-    rows=db_q("SELECT admin_id,action,details,timestamp FROM admin_logs ORDER BY timestamp DESC LIMIT 300")
-    if not rows: st.info("No admin actions logged yet."); return
-    df=pd.DataFrame(rows,columns=["Admin","Action","Details","Timestamp"])
-    df["Timestamp"]=df["Timestamp"].apply(lambda x:str(x)[:19])
-    action_dist=df["Action"].value_counts()
-    fig=go.Figure(go.Bar(x=action_dist.index.tolist(),y=action_dist.values.tolist(),marker_color="#6366f1",text=action_dist.values.tolist(),textposition="outside"))
-    fig.update_layout(title="Admin Actions Distribution",height=250,**PTHEME); st.plotly_chart(fig,use_container_width=True)
-    st.dataframe(df,use_container_width=True)
+    st.markdown('<div class="page-header"><p class="sec-title">📋 Audit Trail</p><p class="sec-sub">Administrator and user actions with timestamps.</p></div>',unsafe_allow_html=True)
+    view = st.radio("View", ["Admin Actions","User Actions"], index=0, horizontal=True)
+    if view == "Admin Actions":
+        rows=db_q("SELECT admin_id,action,details,timestamp FROM admin_logs ORDER BY timestamp DESC LIMIT 300")
+        if not rows: st.info("No admin actions logged yet."); return
+        df=pd.DataFrame(rows,columns=["Admin","Action","Details","Timestamp"]) 
+        df["Timestamp"]=df["Timestamp"].apply(lambda x:str(x)[:19])
+        action_dist=df["Action"].value_counts()
+        fig=go.Figure(go.Bar(x=action_dist.index.tolist(),y=action_dist.values.tolist(),marker_color="#6366f1",text=action_dist.values.tolist(),textposition="outside"))
+        fig.update_layout(title="Admin Actions Distribution",height=250,**PTHEME); st.plotly_chart(fig,use_container_width=True)
+        st.dataframe(df,use_container_width=True)
+    else:
+        rows=db_q("SELECT user_id,username,action,details,timestamp FROM user_actions ORDER BY timestamp DESC LIMIT 500")
+        if not rows: st.info("No user actions logged yet."); return
+        df=pd.DataFrame(rows,columns=["User ID","Username","Action","Details","Timestamp"]) 
+        df["Timestamp"]=df["Timestamp"].apply(lambda x:str(x)[:19])
+        action_dist=df["Action"].value_counts()
+        fig=go.Figure(go.Bar(x=action_dist.index.tolist(),y=action_dist.values.tolist(),marker_color="#06b6d4",text=action_dist.values.tolist(),textposition="outside"))
+        fig.update_layout(title="User Actions Distribution",height=250,**PTHEME); st.plotly_chart(fig,use_container_width=True)
+        st.dataframe(df,use_container_width=True)
 
 # ─── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
