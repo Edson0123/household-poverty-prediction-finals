@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib, os, json, sqlite3, hashlib, uuid, io, base64, warnings
+import joblib, os, json, sqlite3, hashlib, uuid, io, base64, warnings, tempfile
+import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -289,20 +290,57 @@ def save_pred(user,cls,conf,feat_d,recs,src):
 def make_pdf(data):
     pdf=FPDF(); pdf.add_page(); pdf.set_margins(14,14,14); pdf.set_auto_page_break(True,12)
     # Header
-    pdf.set_fill_color(99,102,241); pdf.rect(0,0,220,28,style='F')
-    pdf.set_font("Helvetica","B",17); pdf.set_text_color(255,255,255)
-    pdf.cell(0,12,"",ln=True); pdf.cell(0,8,"  Poverty - Prediction Report",ln=True)
+    pdf.set_fill_color(99,102,241); pdf.rect(0,0,220,34,style='F')
+    pdf.set_font("Helvetica","B",18); pdf.set_text_color(255,255,255)
+    if data.get("profile_pic") and os.path.exists(data["profile_pic"]):
+        try:
+            pdf.image(data["profile_pic"], x=168, y=4, w=28)
+        except Exception:
+            pass
+    pdf.cell(0,12,"",ln=True)
+    pdf.cell(0,8,"  AI Poverty Classification Project",ln=True)
+    pdf.set_font("Helvetica","B",13); pdf.cell(0,8,"  Poverty Prediction Report",ln=True)
     pdf.set_text_color(0,0,0); pdf.ln(6)
     pdf.set_font("Helvetica","",10)
     pdf.cell(0,5,f"Report ID : {uuid.uuid4().hex[:10].upper()}",ln=True)
     pdf.cell(0,5,f"Generated : {dt.now().strftime('%Y-%m-%d %H:%M:%S')}",ln=True)
-    pdf.cell(0,5,f"Analyst   : {data['username']}",ln=True); pdf.ln(4)
+    pdf.cell(0,5,f"Analyst   : {data['username']}",ln=True)
+    if data.get("email"):
+        pdf.cell(0,5,f"Contact   : {data['email']}",ln=True)
+    pdf.ln(4)
     # Result box
     cls_colors={"Extreme Poverty":(239,68,68),"Moderate Poverty":(245,158,11),"Low Poverty":(16,185,129)}
     r,g,b=cls_colors.get(data.get("name", data.get("class_name", "Unknown")),(99,102,241))
     pdf.set_fill_color(r,g,b); pdf.set_text_color(255,255,255); pdf.set_font("Helvetica","B",13)
     pdf.cell(0,10,f"  Classification: {data.get('name', data.get('class_name', 'Unknown'))}   Confidence: {data.get('conf', data.get('confidence', 0.0)):.1%}",ln=True,fill=True)
     pdf.set_text_color(0,0,0); pdf.ln(4)
+    # Classification visual
+    if data.get('proba'):
+        try:
+            fig, ax = plt.subplots(figsize=(6.5, 2.3), dpi=150)
+            class_labels = ["Extreme Poverty","Moderate Poverty","Low Poverty"]
+            probs = [float(p) for p in data.get('proba', [0,0,0])]
+            colors = ['#ef4444','#fbbf24','#34d399']
+            ax.bar(class_labels, [p*100 for p in probs], color=colors, edgecolor='black')
+            ax.set_ylim(0,100)
+            ax.set_ylabel('Probability (%)')
+            ax.set_title('Classification Result Probabilities', pad=12)
+            ax.grid(axis='y', linestyle='--', alpha=0.25)
+            for i, v in enumerate([p*100 for p in probs]):
+                ax.text(i, v + 1.5, f"{v:.1f}%", ha='center', va='bottom', fontsize=9)
+            plt.tight_layout()
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                fig.savefig(tmp.name, bbox_inches='tight', dpi=150)
+                chart_path = tmp.name
+            plt.close(fig)
+            pdf.image(chart_path, x=14, w=182)
+            try:
+                os.remove(chart_path)
+            except Exception:
+                pass
+            pdf.ln(4)
+        except Exception:
+            pdf.ln(2)
     # Recommendations
     pdf.set_font("Helvetica","B",11); pdf.cell(0,7,"AI Recommendations:",ln=True)
     pdf.set_font("Helvetica","",9)
@@ -316,6 +354,15 @@ def make_pdf(data):
     for k,v in data['inputs'].items():
         clean_v = str(v).replace('\t',' ').replace('\n',' ').replace('\xa0',' ').replace('—','-').replace('–','-').replace('’',"'").replace('“','"').replace('”','"').strip()
         pdf.set_x(14); pdf.multi_cell(0,5,f"  * {k}: {clean_v}")
+    pdf.ln(4)
+    pdf.set_font("Helvetica","B",11); pdf.cell(0,7,"All Class Probabilities:",ln=True)
+    pdf.set_font("Helvetica","",9)
+    class_labels = ["Extreme Poverty","Moderate Poverty","Low Poverty"]
+    for lbl, prob in zip(class_labels, data.get('proba', [])):
+        pdf.set_x(14); pdf.cell(0,5,f"  - {lbl}: {prob*100:.1f}%",ln=True)
+    pdf.ln(1)
+    pdf.set_font("Helvetica","I",8);
+    pdf.set_x(14); pdf.cell(0,5,"Note: The selected class is the model prediction; all class probabilities are shown for transparency.",ln=True)
     out=io.BytesIO(); pdf.output(out); out.seek(0); return out
 
 
@@ -391,7 +438,10 @@ def page_login():
                 if st.form_submit_button("Create Account",use_container_width=True):
                     if u and p:
                         ok,msg=register_user(u,p,e,pic)
-                        st.success(msg) if ok else st.error(msg)
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
                     else: st.error("Username and password are required.")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -459,7 +509,9 @@ def page_predict(usr):
                   "Settlement":q_urb,"Region":q_reg}
         save_pred(usr,LABELS[pred],float(max(proba)),inputs_d,recs,"Single Form")
         st.session_state["lp"]={"cls":pred,"name":LABELS[pred],"conf":float(max(proba)),
-                                 "proba":proba,"recs":recs,"inputs":inputs_d,"username":usr["username"]}
+                                 "proba":proba,"recs":recs,"inputs":inputs_d,
+                                 "username":usr["username"],"email":usr.get("email",""),
+                                 "profile_pic":usr.get("profile_pic","")}
 
     if "lp" in st.session_state:
         p=st.session_state["lp"]; cls=p["cls"]; conf=p["conf"]; proba=p["proba"]
