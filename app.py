@@ -193,7 +193,49 @@ def register_user(u,p,e,pic):
         pp=os.path.join(UPLOAD_DIR,"profiles",f"{uuid.uuid4().hex}.{pic.name.split('.')[-1]}")
         open(pp,"wb").write(pic.read())
     db_x("INSERT INTO users VALUES(?,?,?,?,?,?,?)",(str(uuid.uuid4()),u,hp(p),e,"user",pp,dt.now().isoformat()))
+    try:
+        log_user_action(None,u,"user_registered",f"email:{e}|profile_photo:{bool(pic)}")
+    except Exception:
+        pass
     return True,"Account created! Please sign in."
+
+def update_user_profile(user_id,new_username=None,new_profile_pic=None):
+    existing=db_q("SELECT username,email,role,profile_pic_path FROM users WHERE id=?",(user_id,),fetch='one')
+    if not existing: return False,"User not found.",None
+    current_username,current_email,current_role,current_pic=existing
+    updates=[]
+    params=[]
+    name_changed = False
+    pic_changed = False
+    if new_username and new_username!=current_username:
+        if db_q("SELECT 1 FROM users WHERE username=?",(new_username,),fetch='one'):
+            return False,"Username already taken.",None
+        updates.append("username=?"); params.append(new_username)
+        name_changed = True
+    pic_path=current_pic
+    if new_profile_pic:
+        pic_path=os.path.join(UPLOAD_DIR,"profiles",f"{uuid.uuid4().hex}.{new_profile_pic.name.split('.')[-1]}")
+        open(pic_path,"wb").write(new_profile_pic.read())
+        updates.append("profile_pic_path=?"); params.append(pic_path)
+        pic_changed = True
+    if not updates:
+        return True,"No changes made.",{"id":user_id,"username":current_username,"email":current_email,"role":current_role,"profile_pic":current_pic}
+    params.append(user_id)
+    db_x(f"UPDATE users SET {', '.join(updates)} WHERE id=?",tuple(params))
+    if name_changed:
+        db_x("UPDATE predictions SET username=? WHERE user_id=?",(new_username,user_id))
+        db_x("UPDATE user_actions SET username=? WHERE user_id=?",(new_username,user_id))
+        log_user_action(user_id,new_username,"profile_name_change",f"old_username:{current_username}|new_username:{new_username}")
+    if pic_changed:
+        log_user_action(user_id,new_username if name_changed else current_username,"profile_picture_change","updated profile picture")
+    if pic_changed and current_pic and os.path.exists(current_pic):
+        try:
+            os.remove(current_pic)
+        except Exception:
+            pass
+    updated=db_q("SELECT id,username,email,role,profile_pic_path FROM users WHERE id=?",(user_id,),fetch='one')
+    if not updated: return False,"Failed to reload profile.",None
+    return True,"Profile updated successfully.",{"id":updated[0],"username":updated[1],"email":updated[2],"role":updated[3],"profile_pic":updated[4]}
 
 def log_action(aid,action,details):
     db_x("INSERT INTO admin_logs VALUES(?,?,?,?,?)",(str(uuid.uuid4()),aid,action,details,dt.now().isoformat()))
@@ -656,6 +698,8 @@ def page_bulk(usr):
     model,scaler,features=load_pipeline()
     if model is None: return
     results=[]; bar=st.progress(0,"Classifying households…")
+    batch_details = {"rows": len(df), "source_file": up.name}
+    log_user_action(usr.get("id"), usr.get("username"), "batch_prediction", json.dumps(batch_details))
     for i,row in df.iterrows():
         bar.progress((i+1)/len(df),f"Processing {i+1} / {len(df)}")
         try:
@@ -816,7 +860,26 @@ def page_history(usr):
 # ─── PROFILE ────────────────────────────────────────────────────────────────────
 def page_profile(usr):
     st.markdown('<div class="page-header"><p class="sec-title">👤 User Profile</p><p class="sec-sub">Your account overview and usage statistics.</p></div>', unsafe_allow_html=True)
-    c1,c2=st.columns([1,2])
+    
+    # Form section
+    with st.form("profile_edit"):
+        st.markdown("#### Edit Profile")
+        new_name=st.text_input("Researcher Name",value=usr["username"])
+        new_pic=st.file_uploader("Update Profile Photo",type=["png","jpg","jpeg"])
+        submitted = st.form_submit_button("Save Profile",use_container_width=True)
+    
+    if submitted:
+        ok,msg,updated_user=update_user_profile(usr["id"],new_username=new_name,new_profile_pic=new_pic)
+        if ok:
+            st.session_state.usr=updated_user
+            usr = updated_user
+            st.success(msg)
+        else:
+            st.error(msg)
+    
+    # Profile display section
+    st.markdown("---")
+    c1, c2 = st.columns([1,2])
     with c1:
         if usr.get("profile_pic") and os.path.exists(usr["profile_pic"]):
             st.image(usr["profile_pic"],width=130)
@@ -831,13 +894,15 @@ def page_profile(usr):
         top=db_q("SELECT class_name FROM predictions WHERE user_id=? GROUP BY class_name ORDER BY COUNT(*) DESC LIMIT 1",(usr["id"],),fetch='one')
         k2.markdown(f'<div class="kpi"><div class="kpi-val" style="font-size:14px">{top[0][:8] if top else "—"}</div><div class="kpi-lbl">Most Predicted</div></div>',unsafe_allow_html=True)
         st.markdown("</div>",unsafe_allow_html=True)
-        if cls_rows:
-            fig=go.Figure(go.Bar(x=[r[0] for r in cls_rows],y=[r[1] for r in cls_rows],
-                marker_color=["#f87171","#fbbf24","#34d399"][:len(cls_rows)],
-                text=[r[1] for r in cls_rows],textposition="outside",textfont=dict(color="#c4cdd8")))
-            fig.update_layout(title="My Predictions by Class",height=240,yaxis_title="Count",**PTHEME)
-            st.plotly_chart(fig,use_container_width=True)
-            
+    
+    # Stats section
+    if cls_rows:
+        fig=go.Figure(go.Bar(x=[r[0] for r in cls_rows],y=[r[1] for r in cls_rows],
+            marker_color=["#f87171","#fbbf24","#34d399"][:len(cls_rows)],
+            text=[r[1] for r in cls_rows],textposition="outside",textfont=dict(color="#c4cdd8")))
+        fig.update_layout(title="My Predictions by Class",height=240,yaxis_title="Count",**PTHEME)
+        st.plotly_chart(fig,use_container_width=True)
+        
     cout, _ = st.columns(2)
     if cout.button("🚪 Sign Out",use_container_width=True):
         st.session_state.clear(); st.rerun()
@@ -868,8 +933,12 @@ def admin_sidebar(usr):
                 <span style="color: #818cf8; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; font-weight: 700;">System Admin</span>
             </div>
         </div>
-        <div style="font-size: 11px; font-weight: 700; color: #64748b; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 14px; margin-left: 8px;">Command Center</div>
         ''', unsafe_allow_html=True)
+        cutoff=(dt.now()-timedelta(hours=24)).isoformat()
+        recent_actions=db_q("SELECT COUNT(*) FROM user_actions WHERE timestamp>=?",(cutoff,),fetch='one')[0]
+        st.markdown(f'<div style="background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.2);border-radius:14px;padding:12px 14px;margin-bottom:16px;color:#e0e7ff;"><strong>🔔 {recent_actions}</strong> user actions in the last 24h</div>',unsafe_allow_html=True)
+        
+        st.markdown('<div style="font-size: 11px; font-weight: 700; color: #64748b; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 14px; margin-left: 8px;">Command Center</div>', unsafe_allow_html=True)
         
         options = [
             "❖ System Overview",
@@ -911,6 +980,17 @@ def admin_overview():
                 fillcolor="rgba(99,102,241,.12)",line=dict(color="#6366f1",width=2.5),marker=dict(color="#818cf8",size=7)))
             fig_a.update_layout(title="Daily Prediction Activity",height=320,xaxis_title="Date",yaxis_title="Predictions",**PTHEME)
             c2.plotly_chart(fig_a,use_container_width=True)
+        # Recent user activity summary
+        cutoff=(dt.now()-timedelta(hours=24)).isoformat()
+        recent_count=db_q("SELECT COUNT(*) FROM user_actions WHERE timestamp>=?",(cutoff,),fetch='one')[0]
+        recent_rows=db_q("SELECT user_id,username,action,details,timestamp FROM user_actions WHERE timestamp>=? ORDER BY timestamp DESC LIMIT 5",(cutoff,),fetch='all')
+        st.markdown(f"#### 🔔 Recent User Activity — Last 24h ({recent_count} actions)")
+        if recent_rows:
+            recent_df=pd.DataFrame(recent_rows,columns=["User ID","Username","Action","Details","Timestamp"])
+            recent_df["Timestamp"] = recent_df["Timestamp"].apply(lambda x:str(x)[:19])
+            st.dataframe(recent_df,use_container_width=True)
+        else:
+            st.info("No recent user activity in the last 24 hours.")
         # user activity bar
         user_data=db_q("SELECT username,COUNT(*) FROM predictions GROUP BY username ORDER BY COUNT(*) DESC LIMIT 8")
         if user_data:
@@ -1006,6 +1086,9 @@ def admin_ml():
 
 def admin_logs():
     st.markdown('<div class="page-header"><p class="sec-title">📋 Audit Trail</p><p class="sec-sub">Administrator and user actions with timestamps.</p></div>',unsafe_allow_html=True)
+    cutoff=(dt.now()-timedelta(hours=24)).isoformat()
+    recent_count=db_q("SELECT COUNT(*) FROM user_actions WHERE timestamp>=?",(cutoff,),fetch='one')[0]
+    st.markdown(f"<div style='padding:12px 16px;border:1px solid rgba(99,102,241,0.25);border-radius:14px;background:rgba(99,102,241,0.08);margin-bottom:16px;'><strong>🔔 {recent_count}</strong> user actions in the last 24 hours</div>", unsafe_allow_html=True)
     view = st.radio("View", ["Admin Actions","User Actions"], index=0, horizontal=True)
     if view == "Admin Actions":
         rows=db_q("SELECT admin_id,action,details,timestamp FROM admin_logs ORDER BY timestamp DESC LIMIT 300")

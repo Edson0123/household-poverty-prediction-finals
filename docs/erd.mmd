@@ -1,0 +1,43 @@
+erDiagram
+  USERS {
+    id string PK
+    username string
+    password_hash string
+    email string
+    role string
+    profile_pic_path string
+    created_at date
+  }
+
+  PREDICTIONS {
+    id string PK
+    user_id string FK
+    username string
+    timestamp date
+    class_name string
+    confidence float
+    features_json string
+    recommendations_json string
+    dataset_name string
+  }
+
+  ADMIN_LOGS {
+    id string PK
+    admin_id string FK
+    action string
+    details string
+    timestamp date
+  }
+
+  USER_ACTIONS {
+    id string PK
+    user_id string FK
+    username string
+    action string
+    details string
+    timestamp date
+  }
+
+  USERS ||--o{ PREDICTIONS : "creates"
+  USERS ||--o{ USER_ACTIONS : "performs"
+  USERS ||--o{ ADMIN_LOGS : "administers"
