@@ -487,8 +487,8 @@ def page_login():
         .login-logo { margin-top: 30px; }
         </style>""", unsafe_allow_html=True)
         st.markdown('<div class="login-wrap">', unsafe_allow_html=True)
-        st.markdown('<div style="text-align:center"><span class="login-logo">Poverty</span></div>', unsafe_allow_html=True)
-        st.markdown('<p class="login-tag">Uganda Household Poverty Intelligence System</p>', unsafe_allow_html=True)
+        st.markdown('<div style="text-align:center"><span class="login-logo">Uganda Household Poverty Prediction System</span></div>', unsafe_allow_html=True)
+        st.markdown('<p class="login-tag">A Multiclass Poverty Prediction System For Uganda Using Machine Learning And Household Survey Data</p>', unsafe_allow_html=True)
         t1,t2 = st.tabs(["  Sign In  ","   Register  "])
         with t1:
             with st.form("lf"):
